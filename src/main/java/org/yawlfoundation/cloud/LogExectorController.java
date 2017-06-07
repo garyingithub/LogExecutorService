@@ -1,14 +1,18 @@
 package org.yawlfoundation.cloud;
 
+
 import org.dom4j.DocumentException;
 import org.jdom2.Element;
 import org.jdom2.JDOMException;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.springframework.boot.actuate.metrics.Metric;
 import org.yawlfoundation.yawl.elements.data.YParameter;
 import org.yawlfoundation.yawl.engine.interfce.WorkItemRecord;
-import org.yawlfoundation.yawl.engine.interfce.interfaceB.InterfaceBWebsideController;
+import org.yawlfoundation.yawl.engine.interfce.interfaceB.ClusterInterfaceBWebsideController;
 import org.yawlfoundation.yawl.exceptions.YAWLException;
+import org.yawlfoundation.cloud.metrics.InfluxDBGaugeWriter;
 
 import java.io.IOException;
 import java.text.ParseException;
@@ -23,70 +27,96 @@ import java.util.concurrent.TimeUnit;
  * Created by gary on 16/04/2017.
  */
 
-public class LogExectorController extends InterfaceBWebsideController {
+public class LogExectorController extends ClusterInterfaceBWebsideController {
 
-    Map<String, ProcessInstance> processInstanceMap;
-    private String _handle = null;
-
-    private boolean connected() {
-        return _handle != null ;
-    }
+    private Map<String, ProcessInstance> processInstanceMap;
 
 
-    public LogExectorController() {
+    private final Logger logger= LoggerFactory.getLogger(LogExectorController.class);
+
+    private Map<String,String> choicesStorage=new HashMap<>();
+    public LogExectorController(InfluxDBGaugeWriter writer,XMLHelper helper) {
+
         super();
+        this.writer=writer;
         try {
-            this.processInstanceMap=XMLHelper.XML_HELPER.getInstancesFromLog();
-        } catch (DocumentException e) {
-            throw new RuntimeException(e);
-        } catch (ParseException e) {
+            this.processInstanceMap=helper.getInstancesFromLog();
+        } catch (DocumentException | ParseException e) {
             throw new RuntimeException(e);
         }
+        logger.info(String.valueOf(Runtime.getRuntime().availableProcessors()));
 
     }
-
+    private Executor executor=Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors()*2);
     public void handleEnabledWorkItemEvent(final WorkItemRecord workItemRecord) {
 
-        if (! connected()) try {
-            _handle = connect("test:1", "test");
+        String engineId=String.valueOf(Integer.valueOf(workItemRecord.engineId));
+        String caseId=workItemRecord.getCaseID();
 
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-        final WorkItemRecord record;
-        try {
-            record=checkOut(workItemRecord.getID(),_handle);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        } catch (YAWLException e) {
-            throw new RuntimeException(e);
-        }
-
-        String caseId=record.getCaseID();
         if(caseId.contains(".")){
             caseId=caseId.split("\\.")[0];
         }
-        String taskName=record.getTaskName();
-
-        Long durationTime=processInstanceMap.get(caseId).getDurationTime(taskName);
-
-        ScheduledExecutorService executor= Executors.newScheduledThreadPool(5);
-        executor.schedule(new Runnable() {
+        caseId=engineId+" "+caseId;
+      //  if(last_task_timestamps.get(caseId)!=null){
+      //            writer.set(new Metric<Number>(engineId+"_time_span",System.currentTimeMillis()-last_task_timestamps.get(caseId)));
+      //  }
+        executor.execute(new Runnable() {
+            @Override
             public void run() {
+                final WorkItemRecord record;
+                try {
+                     record=checkOut(workItemRecord);
+                } catch (IOException | YAWLException e) {
+                    throw new RuntimeException(e);
+                }
+
+
+                String caseId=record.getCaseID();
+
+
+
+                if(caseId.contains(".")){
+                    caseId=caseId.split("\\.")[0];
+                }
+                String pos=String.valueOf(Integer.valueOf(caseId)%processInstanceMap.size());
+                ProcessInstance instance =processInstanceMap.get(pos);
+
+
+                String taskName=record.getTaskName();
+
+                String choice="";
+                if(taskName.contains("--")){
+                    String[] choices=taskName.split("--")[1].split("-");
+
+                    if(choices!=null&&choices.length>0) {
+
+                        Pair<String, Long> next = instance.next(choices);
+                        choice = next.getKey();
+                    }
+                }
+                Long durationTime=instance.getDurationTime(taskName);
+
+                final String finalChoice = choice;
+                logger.info(caseId+" "+String.valueOf(pos)+" "+taskName + " ?" + String.valueOf(durationTime));
 
                 try {
+                    TimeUnit.MILLISECONDS.sleep(durationTime);
+                } catch (InterruptedException e) {
 
-                    System.out.println(checkInWorkItem(record.getID(),getOutputData(record.getTaskName()),
-                            getOutputData(record.getTaskName()),"",_handle));
-                    System.out.println(record.getTaskName());
-                } catch (IOException e) {
-                    e.printStackTrace();
-                } catch (JDOMException e) {
-                    e.printStackTrace();
+                    Thread.currentThread().interrupt();
                 }
+                try {
+                    checkInWorkItem(record,record.getDataList(),
+                            getOutputData(record.getTaskName(), finalChoice),null);
+                } catch (IOException | JDOMException e) {
+                    throw new RuntimeException(e);
+                }
+
             }
-        },100, TimeUnit.MILLISECONDS);
+        });
+
+
+
 
 
     }
@@ -94,12 +124,13 @@ public class LogExectorController extends InterfaceBWebsideController {
     public YParameter[] describeRequiredParams() {
         YParameter[] params = new YParameter[2];
         params[0] = new YParameter(null, YParameter._INPUT_PARAM_TYPE);
-        params[0].setDataTypeAndName("unsignedLong", "data", XSD_NAMESPACE);
-        params[0].setDocumentation("The status message to post to Twitter");
+        params[0].setDataTypeAndName("string", "splitTaskNames", XSD_NAMESPACE);
+        params[0].setDocumentation("optional task name as follows");
 
         params[1] = new YParameter(null, YParameter._OUTPUT_PARAM_TYPE);
-        params[1].setDataTypeAndName("unsignedLong", "data", XSD_NAMESPACE);
-        params[1].setDocumentation("The status message to post to Twitter");
+        params[1].setDataTypeAndName("string", "splitTaskNames", XSD_NAMESPACE);
+        params[0].setDocumentation("optional task name as follows");
+
         return params;
     }
 
@@ -107,10 +138,11 @@ public class LogExectorController extends InterfaceBWebsideController {
 
     }
 
-    private Element getOutputData(String taskName){
+    private Element getOutputData(String taskName,String value){
+        taskName=taskName.replace(" ","_");
         Element output=new Element(taskName);
-        Element result=new Element("data");
-        result.setText("1");
+        Element result=new Element("splitTaskNames");
+        result.setText(value);
         output.addContent(result);
         return output;
     }

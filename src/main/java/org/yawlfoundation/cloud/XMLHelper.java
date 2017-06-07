@@ -22,35 +22,17 @@ import java.util.*;
 /**
  * Created by gary on 16/04/2017.
  */
+@Component
+public class   XMLHelper {
 
-public enum  XMLHelper {
 
-    XML_HELPER;
-    //@Value("${log.executor.file.location}")
+
+    @Value("${log.executor.file.location}")
     private String fileLocation;
 
+
+
     XMLHelper(){
-        Properties properties=new Properties();
-        FileInputStream inputStream;
-        try {
-            File file=new File("");
-             inputStream=new FileInputStream(file.getCanonicalPath()+"/src/main/resources/application.properties");
-        } catch (FileNotFoundException e) {
-            throw new RuntimeException(e);
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-        try {
-            properties.load(inputStream);
-            inputStream.close();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-
-        fileLocation=properties.getProperty("log.executor.file.location");
-
 
     }
     private Integer count=0;
@@ -69,13 +51,16 @@ public enum  XMLHelper {
             Element e = (Element) iter.next();
             List<Element> workItems=e.elements("AuditTrailEntry");
             String id=e.attributeValue("id");
-            ProcessInstance instance=new ProcessInstance(id);
+            ProcessInstance instance=new ProcessInstance(String.valueOf(count));
             Map<String,Long> assignTimeMap=new HashMap<String, Long>();
 
 
             for(Element element:workItems){
                 String event=element.element("EventType").getText();
                 String taskName=element.element("WorkflowModelElement").getText();
+                if(taskName.startsWith("EVENT")){
+                    continue;
+                }
                 String timeStamp=element.element("Timestamp").getText();
                 timeStamp=timeStamp.substring(0,timeStamp.length()-6);
                 SimpleDateFormat format =  new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss");
@@ -87,17 +72,25 @@ public enum  XMLHelper {
                 }
 
                 if(event.equals("complete")){
-                    instance.addTask(taskName,time-assignTimeMap.get(taskName));
+                    if(assignTimeMap.get(taskName)==null){
+                        instance.addTask(taskName,1000L);
+                    }else {
+
+                        instance.addTask(taskName, time - assignTimeMap.get(taskName) );
+
+                    }
                 }
             }
+            instance.storeBackup();
             result.put(String.valueOf(count++),instance);
 
         }
+
+       // normalize(result);
         return result;
 
 
     }
-
 
 
 
